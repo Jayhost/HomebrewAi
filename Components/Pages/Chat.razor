@@ -1,0 +1,226 @@
+@page "/chat"
+@rendermode InteractiveServer
+@using System.Text.Json
+@using System.Text
+
+<PageTitle>Llama Chat</PageTitle>
+
+<h1>Chat with Llama</h1>
+<p>This UI is talking to a local <code>llama.cpp</code> server instance.</p>
+
+<div class="chat-container">
+    @foreach (var message in messages)
+    {
+        <div class="message @message.CssClass">
+            <div class="icon">@(message.IsUser ? "You" : "🤖")</div>
+            <div class="text">@((MarkupString)message.Content)</div>
+        </div>
+    }
+    @if (isLoading)
+    {
+        <div class="message assistant">
+            <div class="icon">🤖</div>
+            <div class="text"><i>Thinking...</i></div>
+        </div>
+    }
+</div>
+
+
+<div class="input-area">
+    <input @bind="currentPrompt" @onkeydown="HandleKeyDown" placeholder="Ask something..." disabled="@isLoading" />
+    <button @onclick="SendPrompt" disabled="@isLoading">Send</button>
+</div>
+
+@code {
+    [Inject]
+    private HttpClient Http { get; set; } = default!;
+    
+    [Inject]
+    private NavigationManager NavManager { get; set; } = default!;
+
+    // --- State Management ---
+    private List<Message> messages = new();
+    private string currentPrompt = "";
+    private bool isLoading = false;
+
+    // --- Core Logic ---
+    private async Task SendPrompt()
+    {
+        if (string.IsNullOrWhiteSpace(currentPrompt) || isLoading)
+        {
+            return;
+        }
+
+        messages.Add(new Message(currentPrompt, true));
+        var promptToSend = currentPrompt;
+        currentPrompt = "";
+        isLoading = true;
+        StateHasChanged();
+
+        var assistantMessage = new Message("", false);
+        messages.Add(assistantMessage);
+
+     try
+        {
+            var requestData = new
+            {
+                prompt = $"[INST] {promptToSend} [/INST]",
+                stream = true,
+                n_predict = 512
+            };
+            var content = new StringContent(JsonSerializer.Serialize(requestData), Encoding.UTF8, "application/json");
+
+            //var absoluteUri = new Uri(NavManager.BaseUri, "/api/chat");
+            var absoluteUri = $"{NavManager.BaseUri}api/chat";
+            var request = new HttpRequestMessage(HttpMethod.Post, absoluteUri) { Content = content };
+            
+            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"API Error: {response.ReasonPhrase} | Content: {errorContent}");
+                assistantMessage.Content = $"Error: {response.ReasonPhrase}";
+                return;
+            }
+
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var reader = new StreamReader(stream);
+
+            while (!reader.EndOfStream)
+            {
+                var line = await reader.ReadLineAsync();
+                
+                // --- NEW LOGGING ---
+                // This will print every line from the server to your console.
+                Console.WriteLine($"RAW DATA RECEIVED: {line}");
+
+                if (string.IsNullOrEmpty(line) || !line.StartsWith("data: ")) continue;
+                
+                var jsonData = line.Substring(6);
+                var chunk = JsonSerializer.Deserialize<LlamaChunk>(jsonData);
+                
+                if (chunk?.content != null)
+                {
+                    assistantMessage.Content += chunk.content;
+                    StateHasChanged();
+                }
+
+                if (chunk?.stop != null && (chunk.stop is true || (chunk.stop is string str && str == "true")))
+{
+    break;
+}
+            }
+        }
+        catch (Exception ex)
+        {
+            // --- NEW DETAILED ERROR LOGGING ---
+            // This will print the full error to your console. This is the most important part.
+            Console.WriteLine("!!!!!!!!!! AN EXCEPTION OCCURRED !!!!!!!!!!");
+            Console.WriteLine(ex.ToString());
+            Console.WriteLine("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            
+            assistantMessage.Content = $"An exception occurred: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    // --- Helper Methods and Classes ---
+    private async Task HandleKeyDown(KeyboardEventArgs e) { if (e.Key == "Enter") await SendPrompt(); }
+
+    public record Message(string Content, bool IsUser) 
+    { 
+        public string Content { get; set; } = Content; 
+        public string CssClass => IsUser ? "user" : "assistant"; 
+    }
+
+    public class LlamaChunk 
+    { 
+        public string? content { get; set; } 
+        public object? stop { get; set; } 
+    }
+}
+
+
+<style>
+    .chat-container {
+        height: 70vh;
+        overflow-y: auto;
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 10px;
+        background-color: #f9f9f9;
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+    }
+
+    .message {
+        display: flex;
+        align-items: flex-start;
+        max-width: 80%;
+    }
+
+    .message.user {
+        align-self: flex-end;
+        flex-direction: row-reverse;
+    }
+
+    .message.assistant {
+        align-self: flex-start;
+    }
+
+    .message .icon {
+        font-size: 1.5rem;
+        margin: 0 10px;
+    }
+
+    .message .text {
+        padding: 10px 15px;
+        border-radius: 15px;
+        background-color: #e0e0e0;
+        word-wrap: break-word;
+        white-space: pre-wrap;
+    }
+
+    .message.user .text {
+        background-color: #007bff;
+        color: white;
+    }
+
+    .message.assistant .text {
+        background-color: #ffffff;
+        border: 1px solid #ddd;
+    }
+    
+    .input-area {
+        display: flex;
+        gap: 10px;
+    }
+
+    .input-area input {
+        flex-grow: 1;
+        padding: 10px;
+        border-radius: 5px;
+        border: 1px solid #ccc;
+    }
+
+    .input-area button {
+        padding: 10px 20px;
+        border-radius: 5px;
+        border: none;
+        background-color: #007bff;
+        color: white;
+        cursor: pointer;
+    }
+    
+    .input-area button:disabled {
+        background-color: #aaa;
+    }
+</style>
